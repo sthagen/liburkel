@@ -151,7 +151,7 @@ test_urkel_sanity(void) {
     ASSERT(value_len == 64);
     ASSERT(urkel_memcmp(value, kvs[i].value, 64) == 0);
 
-    free(proof_raw);
+    urkel_free(proof_raw);
   }
 
   urkel_root(db, old_root);
@@ -216,7 +216,7 @@ test_urkel_sanity(void) {
       ASSERT(urkel_memcmp(value, kvs[i].value, 64) == 0);
     }
 
-    free(proof_raw);
+    urkel_free(proof_raw);
   }
 
   ASSERT(urkel_tx_commit(tx));
@@ -293,9 +293,131 @@ test_urkel_sanity(void) {
   urkel_kv_free(kvs);
 }
 
+static void
+test_urkel_node_replacement(void) {
+  /* See: https://github.com/chjj/liburkel/issues/6 */
+  urkel_kv_t *kvs = urkel_kv_generate(2);
+  urkel_tx_t *tx;
+  urkel_t *db;
+
+  urkel_destroy(URKEL_PATH);
+
+  db = urkel_open(URKEL_PATH);
+
+  ASSERT(db != NULL);
+
+  tx = urkel_tx_create(db, NULL);
+
+  ASSERT(tx != NULL);
+  ASSERT(urkel_tx_insert(tx, kvs[0].key, kvs[0].value, 64));
+  ASSERT(urkel_tx_commit(tx));
+
+  ASSERT(!urkel_tx_remove(tx, kvs[1].key));
+
+  ASSERT(urkel_tx_insert(tx, kvs[1].key, kvs[1].value, 64));
+  ASSERT(urkel_tx_commit(tx));
+
+  ASSERT(urkel_tx_insert(tx, kvs[0].key, kvs[0].value, 64));
+  ASSERT(urkel_tx_insert(tx, kvs[1].key, kvs[1].value, 64));
+  ASSERT(urkel_tx_insert(tx, kvs[0].key, kvs[1].value, 64));
+  ASSERT(urkel_tx_commit(tx));
+
+  ASSERT(urkel_tx_remove(tx, kvs[1].key));
+  ASSERT(urkel_tx_commit(tx));
+
+  urkel_tx_destroy(tx);
+  urkel_close(db);
+
+  ASSERT(urkel_destroy(URKEL_PATH));
+
+  urkel_kv_free(kvs);
+}
+
+static void
+test_urkel_leaky_inject(void) {
+  /* Valgrind should error out if the bug is present. */
+  /* See: https://github.com/chjj/liburkel/issues/7 */
+  urkel_kv_t *kvs = urkel_kv_generate(2);
+  unsigned char root[32];
+  unsigned char tmp[32];
+  urkel_tx_t *tx;
+  urkel_t *db;
+
+  urkel_destroy(URKEL_PATH);
+
+  db = urkel_open(URKEL_PATH);
+
+  ASSERT(db != NULL);
+
+  tx = urkel_tx_create(db, NULL);
+
+  ASSERT(tx != NULL);
+
+  ASSERT(urkel_tx_insert(tx, kvs[0].key, kvs[0].value, 64));
+  ASSERT(urkel_tx_commit(tx));
+
+  urkel_tx_root(tx, root);
+
+  ASSERT(urkel_tx_insert(tx, kvs[1].key, kvs[1].value, 64));
+  ASSERT(urkel_tx_commit(tx));
+
+  urkel_tx_root(tx, tmp);
+
+  ASSERT(urkel_memcmp(tmp, root, 32) != 0);
+
+  ASSERT(urkel_tx_inject(tx, root));
+
+  urkel_tx_root(tx, tmp);
+
+  ASSERT(urkel_memcmp(tmp, root, 32) == 0);
+
+  urkel_tx_clear(tx);
+
+  urkel_tx_root(tx, tmp);
+
+  ASSERT(urkel_memcmp(tmp, root, 32) != 0);
+
+  urkel_tx_destroy(tx);
+  urkel_close(db);
+
+  ASSERT(urkel_destroy(URKEL_PATH));
+
+  urkel_kv_free(kvs);
+}
+
+static void
+test_urkel_max_value_size(void) {
+  unsigned char key[32];
+  unsigned char val[1023 + 1];
+  urkel_t *db;
+
+  memset(key, 0xaa, sizeof(key));
+  memset(val, 0x11, sizeof(val));
+
+  urkel_destroy(URKEL_PATH);
+
+  db = urkel_open(URKEL_PATH);
+
+  ASSERT(db != NULL);
+
+  urkel_errno = 0;
+
+  ASSERT(!urkel_insert(db, key, val, sizeof(val)));
+  ASSERT(urkel_errno == URKEL_EINVAL);
+
+  ASSERT(urkel_insert(db, key, val, sizeof(val) - 1));
+
+  urkel_close(db);
+
+  ASSERT(urkel_destroy(URKEL_PATH));
+}
+
 int
 main(void) {
   test_memcmp();
   test_urkel_sanity();
+  test_urkel_node_replacement();
+  test_urkel_leaky_inject();
+  test_urkel_max_value_size();
   return 0;
 }
